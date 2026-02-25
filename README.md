@@ -1,5 +1,3 @@
 This is a project for an Immersion Heater Alert System.
 
 The aim of this project we are creating is to use an Arduino and the Grove Starter Kit to design and make a Smart immersion heater Alerting system. By knowing when an immersion heater has been left on for a long period of time and notifying the students in the shared accommodation, this system is to prevent energy loss in student housing. Immersion heaters use a lot of electricity.  Students often neglect to turn them off, which results in higher electricity costs and wasteful energy usage. This project suggests a secure Internet of Things based solution that tracks heater activity and sends out notifications when the heater runs for longer than a set amount of time. 
-
-Immersion heaters use up a lot of electricity. Students normally forget to switch them off, which leads to high electricity bills and unnecessary energy usage. This project will be a safe internet of things based solution that watches heater activity and provides alerts when the heater exceeds a duration of time. 
