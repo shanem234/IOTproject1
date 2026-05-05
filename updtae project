@@ -1,12 +1,13 @@
-#define BLYNK_TEMPLATE_ID "TMPL4hgQZ3JNf"
+#define BLYNK_TEMPLATE_ID   "TMPL4hgQZ3JNf"
 #define BLYNK_TEMPLATE_NAME "immersion heater alerter"
-#define BLYNK_AUTH_TOKEN "6sUan8E8PoUxlvX-dtnrlgQwmgQ11AgV"
-#include <WiFi.h>
-#include <BlynkSimpleEsp32.h>
+#define BLYNK_AUTH_TOKEN    "6sUan8E8PoUxlvX-dtnrlgQwmgQ11AgV"
+
+#include <WiFiS3.h>
+#include <BlynkSimpleWifi.h>
 #include <Wire.h>
 #include <rgb_lcd.h>
 #include <math.h>
-#include <HTTPClient.h>        // NEW: for sending data to Google Sheets
+#include <WiFiClient.h>
 
 rgb_lcd lcd;
 BlynkTimer timer;
@@ -18,46 +19,86 @@ const int tempPin   = A0;
 const int ledPin    = 6;
 const int buzzerPin = 5;
 const int buttonPin = 4;
+const int relayPin  = 7;
 
-const float thresholdTemp   = 40.0;
-const float highTempWarning = 70.0;
-const unsigned long alertDuration = 10000;
+const float thresholdTemp   = 15.0;
+const float highTempWarning = 20.0;
+const unsigned long alertDuration = 100;
 
-// NEW: paste your deployed Web App URL here
-const char* sheetsURL = "https://script.google.com/macros/s/AKfycbxKzS4Vm4CsIasPJKofIUxkaWy-sidcOJSvTR0M_6gP6Bt26OaKQUkz3QxF8xq6uauC/exec";
+const char* sheetsHost = "script.google.com";
+const String sheetsPath = "/macros/s/AKfycbxKzS4Vm4CsIasPJKofIUxkaWy-sidcOJSvTR0M_6gP6Bt26OaKQUkz3QxF8xq6uauC/exec";
 
 unsigned long heaterStartTime = 0;
 bool heaterOn   = false;
 bool alertSent  = false;
 bool alertMuted = false;
+bool relayOn    = false;
 int lastButtonState = HIGH;
 
-// NEW: only log to Sheets every 60 seconds, not every second
 unsigned long lastSheetLog = 0;
-const unsigned long sheetInterval = 300000; // 5 minutes in milliseconds
+const unsigned long sheetInterval = 10000;
 
-// NEW FUNCTION — sends one row to Google Sheets
 void logToSheets(float temperature, bool heaterOn, bool alertMuted, unsigned long runtimeMinutes) {
-  if (WiFi.status() != WL_CONNECTED) return;  // skip if WiFi dropped
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping Sheets log");
+    return;
+  }
 
-  HTTPClient http;
-  http.begin(sheetsURL);
-  http.addHeader("Content-Type", "application/json");
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // Google redirects once
+  WiFiSSLClient client;
+  client.setTimeout(10000);
 
-  String payload = "{";
-  payload += "\"temperature\":"    + String(temperature, 1) + ",";
-  payload += "\"heaterStatus\":\""  + String(heaterOn ? "ON" : "OFF") + "\",";
-  payload += "\"alertMuted\":"     + String(alertMuted ? "true" : "false") + ",";
-  payload += "\"runtimeMinutes\":" + String(runtimeMinutes);
-  payload += "}";
+  String url = "/macros/s/AKfycbxKzS4Vm4CsIasPJKofIUxkaWy-sidcOJSvTR0M_6gP6Bt26OaKQUkz3QxF8xq6uauC/exec";
+  url += "?temperature=" + String(temperature, 1);
+  url += "&heaterStatus=" + String(heaterOn ? "ON" : "OFF");
+  url += "&alertMuted=" + String(alertMuted ? "true" : "false");
+  url += "&runtimeMinutes=" + String(runtimeMinutes);
 
-  int responseCode = http.POST(payload);
+  Serial.println("Connecting to Sheets...");
 
-  Serial.print("Sheets log status: ");
-  Serial.println(responseCode);
+  if (!client.connect("script.google.com", 443)) {
+    Serial.println("Connection failed");
+    return;
+  }
 
-  http.end();
+  client.println("GET " + url + " HTTP/1.1");
+  client.println("Host: script.google.com");
+  client.println("Connection: close");
+  client.println();
+
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > 10000) {
+      Serial.println("Sheets timeout");
+      client.stop();
+      return;
+    }
+  }
+
+  String response = client.readStringUntil('\n');
+  Serial.println("Sheets: " + response);
+  client.stop();
+}
+
+BLYNK_WRITE(V5) {
+  int buttonState = param.asInt();
+  relayOn = buttonState;
+  digitalWrite(relayPin, relayOn);
+
+  if (relayOn == 0) {
+    alertMuted = true;
+    alertSent  = false;
+    digitalWrite(ledPin, LOW);
+    digitalWrite(buzzerPin, LOW);
+    lcd.setCursor(0, 1);
+    lcd.print("Relay OFF       ");
+  } else {
+    alertMuted = false;
+    lcd.setCursor(0, 1);
+    lcd.print("Relay ON        ");
+  }
+
+  Blynk.virtualWrite(V4, alertMuted ? 1 : 0);
+  Blynk.virtualWrite(V5, relayOn ? 1 : 0);
 }
 
 void checkButton() {
@@ -83,9 +124,9 @@ void checkButton() {
 }
 
 float readTemperature() {
-  int analogValue   = analogRead(tempPin);
-  float voltage     = analogValue * (3.3 / 4095.0);
-  float temperature = voltage * 100.0;
+  int analogValue = analogRead(tempPin);
+  float resistance = (16383.0 - analogValue) * 10000.0 / analogValue;
+  float temperature = 1.0 / (log(resistance / 10000.0) / 3975.0 + 1.0 / 298.15) - 273.15;
   return temperature;
 }
 
@@ -101,7 +142,11 @@ void checkHeaterStatus() {
 
   if (temperature > thresholdTemp) {
     lcd.setCursor(0, 1);
-    lcd.print("Immersion is on");
+    if (relayOn) {
+      lcd.print("Relay+Heater ON ");
+    } else {
+      lcd.print("Immersion is  ");
+    }
 
     if (!heaterOn) {
       heaterOn        = true;
@@ -138,14 +183,18 @@ void checkHeaterStatus() {
     }
 
   } else {
-    heaterOn   = false;
-    alertSent  = false;
-    alertMuted = false;
+    heaterOn       = false;
+    alertSent      = false;
+    alertMuted     = false;
     runtimeMinutes = 0;
     digitalWrite(ledPin, LOW);
     digitalWrite(buzzerPin, LOW);
     lcd.setCursor(0, 1);
-    lcd.print("Normal          ");
+    if (relayOn) {
+      lcd.print("Relay ON        ");
+    } else {
+      lcd.print("Normal          ");
+    }
     alertMessage = "Safe";
   }
 
@@ -154,18 +203,21 @@ void checkHeaterStatus() {
   Blynk.virtualWrite(V2, runtimeMinutes);
   Blynk.virtualWrite(V3, alertMessage);
 
-  // NEW: log to Google Sheets every 60 seconds
-  if (millis() - lastSheetLog >= sheetInterval) {
+  if (millis() - lastSheetLog >= sheetInterval && heaterOn) {
     logToSheets(temperature, heaterOn, alertMuted, runtimeMinutes);
     lastSheetLog = millis();
   }
-}
+}  // <-- this was the missing brace
 
 void setup() {
-  Serial.begin(115200);
+  pinMode(relayPin,  OUTPUT);
   pinMode(ledPin,    OUTPUT);
   pinMode(buzzerPin, OUTPUT);
   pinMode(buttonPin, INPUT_PULLUP);
+  digitalWrite(relayPin, LOW);
+
+  Serial.begin(115200);
+  analogReadResolution(14);
 
   lcd.begin(16, 2);
   lcd.print("Connecting...");
